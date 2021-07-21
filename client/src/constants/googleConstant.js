@@ -1,0 +1,2 @@
+
+export const GOOGLE_LOGOUT = 'GOOGLE_LOGOUT'

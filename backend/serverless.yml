@@ -1,0 +1,296 @@
+service:
+  name: serverless-vaccine-app
+
+plugins:
+  - serverless-webpack
+  - serverless-iam-roles-per-function
+  # we use serverless reqvalidator and server documentation plugin to validate incoming http request using jsonschema
+  - serverless-reqvalidator-plugin
+  - serverless-aws-documentation
+  - serverless-offline
+  - serverless-dynamodb-local
+  - serverless-plugin-canary-deployments
+
+
+custom:
+
+  serverless-offline:
+    port: 3000
+
+  dynamodb:
+    start:
+      port: 8000
+      inMemory: true
+      migrate: true
+    stages:
+      -${self:provider.stage}
+  documentation:
+    api:
+      info:
+        version: v1.0.0
+        title: Vaccine Api
+        description: Serverless Application with CRUD abilities for VaccineForms
+    models:
+      - name: CreateVaccine
+        contentType: application/json
+        schema: ${file(validatemodels/create-vaccineform-request.json)}
+      - name: UpdateVaccine
+        contentType: application/json
+        schema: ${file(validatemodels/update-vaccineform-request.json)}
+
+provider:
+  tracing:
+    lambda: true
+    apiGateway: true
+  name: aws
+  runtime: nodejs12.x
+  # it uses the options "dev" if an option is not provided in  the CLI setup
+  stage: ${opt:stage, 'dev'}
+  #it uses the options "us-east-2" if an option is not provided in the CLI setup
+  region: ${opt:region, 'us-east-2'}
+  # deploymentBucket:
+  #   skipPolicySetup: true
+
+  #Global variables setup
+  environment:
+    # The DynamoDB table have unique names. They need to be unique per account per region
+    # Names are UTF-8 encoded, case-sensitive and should be between 3 and 255 charaters long
+    VACCINE_TABLE: ${self:service.name}-vaccine-${self:provider.stage}
+    VACCINE_IMAGES_S3_BUCKET: ${self:service.name}-images-vaccinephoto-${self:provider.stage}
+    VACCINE_SIGNED_URL_EXPIRATION: 900
+    INDEX_NAME: vaccineId
+
+  # iamRoleStatements:
+  #   - Effect: Allow
+  #     Action:
+  #       - codedeploy:*
+  #     Resource:
+  #       - "*"
+
+
+    
+
+    
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  # TODO: Configure this function
+  GetVaccines:
+    handler: src/lambda/http/getVaccine.handler
+    events:
+      - http:
+          method: get
+          path: vaccines
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.VACCINE_TABLE}
+
+      
+
+  # TODO: Configure this function
+  CreateVaccine:
+    handler: src/lambda/http/createVaccine.handler
+    events:
+      - http:
+          method: post
+          path: vaccine
+          authorizer: Auth
+          cors: true
+          reqValidatorName: RequestBodyValidator
+          request:
+          schema:
+            schema:
+            application/json: ${validatemodels/create-vaccineform-request.json)}
+          documentation:
+            summary: Create a new vaccine ID card
+            description: Create a vaccine card
+            requestModels:
+              'application/json': CreateVaccine
+
+    iamRoleStatements:
+      # TODOS_TABLE permissions for all lambda functions
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.VACCINE_TABLE}
+
+
+    # deploymentSettings:
+    #   type: Linear10PercentEvery1Minute
+    #   alias: Live
+            
+
+  # TODO: Configure this function
+  UpdateVaccine:
+    handler: src/lambda/http/updateVaccine.handler
+    events:
+      - http:
+          method: patch
+          path: vaccine/{vaccineId}
+          authorizer: Auth
+          reqValidatorName: RequestBodyValidator
+          request:
+          schema:
+            ${file(validatemodels/update-vaccineform-request.json)}
+          cors: true
+          documentation:
+            summary: Update a vaccine id card
+            description: update a vaccine id card
+            requestModels:
+              'application/json': UpdateVaccine
+    
+       
+    iamRoleStatements:
+      # TODOS_TABLE permissions for all lambda functions
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.VACCINE_TABLE}
+
+
+          
+  # TODO: Configure this function
+  DeleteTodo:
+    handler: src/lambda/http/deleteVaccine.handler
+    events:
+      - http:
+          method: delete
+          path: vaccine/{vaccineId}
+          authorizer: Auth
+          cors: true
+
+
+
+    iamRoleStatements:
+      # TODOS_TABLE permissions for all lambda functions
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:DeleteItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.VACCINE_TABLE}
+      
+      - Effect: Allow
+        Action:
+          - s3:DeleteObject
+        Resource: arn:aws:s3:::${self:provider.environment.VACCINE_IMAGES_S3_BUCKET}/*
+
+
+  # # TODO: Configure this function
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+      - http:
+          method: post
+          path: vaccine/{vaccineId}/attachment
+          authorizer: Auth
+          cors: true
+    
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+        Resource: arn:aws:s3:::${self:provider.environment.VACCINE_IMAGES_S3_BUCKET}/*
+      - Effect: Allow
+        Action:
+          - dynamodb:UpdateItem
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.VACCINE_TABLE}
+
+resources:
+  Resources:
+    # Add DynamoDB Table Definition
+    # DynamoDB is schemaless, we need to define only the primary key and global secondary keys.
+    VaccineDynamoDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        # single id field of type string which is the partition key
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: vaccineId
+            AttributeType: S
+        # so, we set the simple primary key as hash key
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: vaccineId
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.VACCINE_TABLE}
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.INDEX_NAME}
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: vaccineId
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+  
+    AttachmentsVaccineBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.VACCINE_IMAGES_S3_BUCKET}
+        # important so S3 can send the correct CORS HEADERS
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000        
+    
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: '2012-10-17'
+          Statement:
+            - Sid: PublicReadForGetBucketObjects
+              Effect: Allow
+              # allows for anybody '*' to get objects of our s3 bucket
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: 'arn:aws:s3:::${self:provider.environment.VACCINE_IMAGES_S3_BUCKET}/*'
+        # specify which bucket this bucketPolicy should be applied
+        Bucket: !Ref AttachmentsVaccineBucket          
+              
+
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+
+# Addtional Resources to validate  incoming request using the json schema
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      # we need a name and an id of the api which we will use
+      Properties:
+        Name: 'request-body-validator'
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        # it only validate body requests and not request parameters
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
